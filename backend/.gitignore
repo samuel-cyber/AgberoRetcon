@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# env files — never commit real credentials (.env.example is intentional)
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+{
+  "name": "agberorecon-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test",
+    "db:init": "node src/db.js",
+    "db:seed": "node src/seed.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "pg": "^8.16.3"
+  }
+}
