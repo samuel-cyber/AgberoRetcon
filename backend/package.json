@@ -7,6 +7,7 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test",
+    "test:integration": "node --test test/loop.integration.test.mjs",
     "db:init": "node src/db.js",
     "db:seed": "node src/seed.js",
     "seed": "node src/seed.js"

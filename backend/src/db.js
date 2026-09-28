@@ -57,6 +57,10 @@ export async function initDb() {
   // A driver pays the daily levy once. Enforced in the database as well as in
   // the USSD flow, so no future code path can double-charge a plate.
   await createDailyLevyConstraint();
+
+  // The agent's first UNPAID detection of the day is worth recording; the
+  // fortieth is not. Same idea, enforced in the database.
+  await createUnpaidCheckConstraint();
 }
 
 async function createDailyLevyConstraint() {
@@ -79,6 +83,35 @@ async function createDailyLevyConstraint() {
     console.warn(
       'Duplicate same-day PAID rows exist. The USSD flow still blocks a second payment,',
       'but the database is no longer enforcing it.',
+    );
+  }
+}
+
+/**
+ * An agent checking an unpaid bus records the fact once a day.
+ *
+ * Without this, every re-check of the same vehicle would add another UNPAID row
+ * and inflate the dashboard's dispute count. Like the daily-levy rule above,
+ * this is a database constraint rather than a convention, so two agents
+ * checking the same plate at the same moment cannot double-log it — the losing
+ * INSERT gets 23505 and is treated as "already recorded".
+ */
+async function createUnpaidCheckConstraint() {
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_one_unpaid_per_plate_per_day
+        ON transactions (
+          plate_number,
+          ((created_at AT TIME ZONE '${SETTLEMENT_TIME_ZONE}')::date)
+        )
+        WHERE status = 'UNPAID';
+    `);
+  } catch (error) {
+    // Same trade-off as the daily-levy constraint: warn loudly and keep booting.
+    console.warn('Could not create the one-unpaid-check-per-plate-per-day constraint:', error.message);
+    console.warn(
+      'Duplicate same-day UNPAID rows exist. The agent flow still answers correctly,',
+      'but the database is no longer deduplicating the ledger.',
     );
   }
 }

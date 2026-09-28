@@ -1,9 +1,10 @@
-// Access control for the Africa's Talking USSD callback.
+// Access control for the Africa's Talking USSD callback and, optionally, for the
+// dashboard-facing API.
 //
 // AT does not sign USSD callbacks, so without a guard anyone who learns the
 // URL can POST arbitrary phone numbers and text: reading balances, moving
-// money, or probing plates. Both checks are opt-in via environment variables
-// so the demo keeps working out of the box; set them for any real deployment.
+// money, or probing plates. All checks are opt-in via environment variables so
+// the demo keeps working out of the box; set them for any real deployment.
 import { timingSafeEqual } from 'node:crypto';
 
 /** Pulls the caller's IP, unwrapping IPv4-mapped IPv6 ("::ffff:1.2.3.4"). */
@@ -48,6 +49,27 @@ function safeEqual(a, b) {
   const right = Buffer.from(String(b));
   if (left.length !== right.length) return false;
   return timingSafeEqual(left, right);
+}
+
+/**
+ * Optional key for the dashboard API (the ledger the web page polls).
+ *
+ * Opt-in on purpose: the dashboard is read-only and meant to be watched live by
+ * judges, so with DASHBOARD_API_KEY unset the endpoints stay public. Set it
+ * before the deployment goes anywhere real — ledger rows carry the phone
+ * numbers of the drivers and agents using the system.
+ *
+ * @returns {{allowed: true} | {allowed: false, status: number, reason: string}}
+ */
+export function checkDashboardAccess(req, apiKey = '') {
+  if (!apiKey) return { allowed: true };
+
+  const provided = req.query?.key || req.get?.('x-api-key') || '';
+  if (!safeEqual(provided, apiKey)) {
+    return { allowed: false, status: 401, reason: 'bad dashboard API key' };
+  }
+
+  return { allowed: true };
 }
 
 export function parseAllowedIps(raw) {

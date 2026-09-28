@@ -1,8 +1,8 @@
-import { pool, SETTLEMENT_TIME_ZONE } from './db.js';
+import { pool } from './db.js';
 import { cleanPhone, cleanPlate, isValidPlate, plateKey } from './validation.js';
-
-const LEVY_AMOUNT = 500;
-export const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+import { clearSession, getSession, saveSession } from './sessions.js';
+import { LEVY_AMOUNT } from './levy.js';
+import { findTodaysPayment } from './ledger.js';
 
 function end(message) {
   return `END ${message}`;
@@ -10,42 +10,6 @@ function end(message) {
 
 function continueWith(message) {
   return `CON ${message}`;
-}
-
-async function getSession(client, phone) {
-  const result = await client.query(
-    `SELECT phone, state, plate_number, amount, updated_at
-     FROM sessions
-     WHERE phone = $1`,
-    [phone],
-  );
-
-  const session = result.rows[0];
-  if (!session) return null;
-
-  if (Date.now() - new Date(session.updated_at).getTime() > SESSION_TIMEOUT_MS) {
-    await client.query('DELETE FROM sessions WHERE phone = $1', [phone]);
-    return null;
-  }
-
-  return session;
-}
-
-async function saveSession(client, phone, state, plateNumber = null, amount = null) {
-  await client.query(
-    `INSERT INTO sessions (phone, state, plate_number, amount, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     ON CONFLICT (phone) DO UPDATE SET
-       state = EXCLUDED.state,
-       plate_number = EXCLUDED.plate_number,
-       amount = EXCLUDED.amount,
-       updated_at = NOW()`,
-    [phone, state, plateNumber, amount],
-  );
-}
-
-async function clearSession(client, phone) {
-  await client.query('DELETE FROM sessions WHERE phone = $1', [phone]);
 }
 
 /**
@@ -62,24 +26,6 @@ async function getWalletByPhone(client, phone) {
     [phone],
   );
   return result.rows[0] || null;
-}
-
-const ALREADY_PAID_SQL = `
-  SELECT 1 FROM transactions
-  WHERE plate_number = $1
-    AND status = 'PAID'
-    AND (created_at AT TIME ZONE $2::text)::date
-      = (NOW() AT TIME ZONE $2::text)::date
-  LIMIT 1
-`;
-
-/** Has this plate already paid the levy today (in park-local time)? */
-async function hasPaidToday(client, plateNumber) {
-  const result = await client.query(ALREADY_PAID_SQL, [
-    plateNumber,
-    SETTLEMENT_TIME_ZONE,
-  ]);
-  return result.rowCount > 0;
 }
 
 /**
@@ -116,7 +62,7 @@ async function payLevy(client, { phone, plateNumber, amount }) {
     // plate without separators still produces a canonical ledger row.
     const canonicalPlate = wallet.plate_number;
 
-    if (await hasPaidToday(client, canonicalPlate)) {
+    if (await findTodaysPayment(client, canonicalPlate)) {
       await client.query('ROLLBACK');
       return { ok: false, reason: 'ALREADY_PAID' };
     }
@@ -165,19 +111,6 @@ async function payLevy(client, { phone, plateNumber, amount }) {
     await client.query('ROLLBACK');
     throw error;
   }
-}
-
-/**
- * Deletes sessions abandoned mid-menu. Without this, a row lingers for every
- * phone that ever dialled and was never seen again.
- */
-export async function sweepExpiredSessions() {
-  const result = await pool.query(
-    `DELETE FROM sessions
-     WHERE updated_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')`,
-    [SESSION_TIMEOUT_MS],
-  );
-  return result.rowCount;
 }
 
 const MAIN_MENU =
@@ -250,7 +183,7 @@ export async function handleUSSD({ phoneNumber, text = '' }) {
         );
       }
 
-      if (await hasPaidToday(client, wallet.plate_number)) {
+      if (await findTodaysPayment(client, wallet.plate_number)) {
         await clearSession(client, phone);
         return end(`Levy already paid today for ${wallet.plate_number}.`);
       }
