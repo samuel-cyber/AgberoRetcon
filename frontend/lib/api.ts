@@ -156,8 +156,9 @@ export async function fetchTransactions(
   if (filters.status && filters.status !== "ALL") {
     params.set("status", filters.status);
   }
-  if (filters.plate && filters.plate.trim()) {
-    params.set("plate", filters.plate.trim());
+  const cleanedPlate = filters.plate?.trim().replace(/\s+/g, "").toUpperCase();
+  if (cleanedPlate && cleanedPlate.length >= 3) {
+    params.set("plate", cleanedPlate);
   }
   if (filters.date) {
     params.set("date", filters.date);
@@ -194,9 +195,12 @@ export async function fetchVehicleStatus(
   baseUrl = getBaseApiUrl(),
   apiKey = getApiKey()
 ): Promise<VehicleStatus> {
-  const cleanedPlate = plate.trim();
+  const cleanedPlate = plate.trim().replace(/\s+/g, "").toUpperCase();
   if (!cleanedPlate) {
     throw new Error("Vehicle plate number is required");
+  }
+  if (cleanedPlate.length < 3) {
+    throw new Error("Plate number must be at least 3 characters (e.g. LND)");
   }
 
   const res = await fetch(

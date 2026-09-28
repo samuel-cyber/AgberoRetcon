@@ -34,6 +34,23 @@ export default function AgberoAuth() {
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (typeof window !== "undefined") {
+      const email = formData.email.trim();
+      const badgeId = formData.badgeId.trim() || "NURTW-OFFICER";
+      const name = isLogin
+        ? email.split("@")[0] || "Authorized Officer"
+        : `${formData.firstName} ${formData.lastName}`.trim() || "Authorized Officer";
+
+      localStorage.setItem(
+        "agbero_session",
+        JSON.stringify({
+          email,
+          badgeId,
+          name,
+          loggedInAt: new Date().toISOString(),
+        })
+      );
+    }
     router.push("/dashboard");
   };
 
@@ -320,16 +337,10 @@ export default function AgberoAuth() {
             </div>
           </div>
 
-          {/* Quick Direct Link to Live Dashboard */}
+          {/* Security footnote */}
           <div className="mt-8 pt-4 border-t border-[#EAEFEA] flex justify-between items-center text-xs text-[#6F7771]">
             <span>Transport Levy Settlement Network</span>
-            <Link
-              href="/dashboard"
-              className="text-[#1B4D2E] hover:text-[#13371F] font-semibold flex items-center gap-1 hover:underline"
-            >
-              <span>Live Dashboard</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
+            <span className="text-[11px] text-[#7A827D] font-medium">Lagos State Transit Portal</span>
           </div>
         </div>
 

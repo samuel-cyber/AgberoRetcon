@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Search,
   Settings,
@@ -50,6 +51,8 @@ const formatClock = (date: Date): string => {
 };
 
 export default function AgberoReconDashboard() {
+  const router = useRouter();
+
   // Live Ledger & KPI state
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [kpis, setKpis] = useState<DashboardSummary>({
@@ -93,9 +96,27 @@ export default function AgberoReconDashboard() {
     setMounted(true);
     setCurrentTime(new Date());
     setCustomApiUrl(getBaseApiUrl());
+
+    // Route protection: only users who signed in/up can access dashboard
+    if (typeof window !== "undefined") {
+      const session = localStorage.getItem("agbero_session");
+      if (!session) {
+        router.push("/login");
+        return;
+      }
+    }
+
     const clockTimer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(clockTimer);
-  }, []);
+  }, [router]);
+
+  // Sign out handler
+  const handleSignOut = () => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("agbero_session");
+    }
+    router.push("/login");
+  };
 
   // Fetch live ledger and summary from Render backend
   const loadData = useCallback(async (showIndicator = false) => {
@@ -230,13 +251,14 @@ export default function AgberoReconDashboard() {
               </button>
 
               {/* Sign Out */}
-              <Link
-                href="/login"
-                className="p-2 rounded-lg text-[#5B635E] hover:text-[#B91C1C] hover:bg-[#FDECEE] transition-colors"
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="p-2 rounded-lg text-[#5B635E] hover:text-[#B91C1C] hover:bg-[#FDECEE] transition-colors cursor-pointer"
                 title="Sign Out"
               >
                 <LogOut className="h-4 w-4" />
-              </Link>
+              </button>
             </div>
           </div>
         </div>
