@@ -1,59 +1,36 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
-  Clock,
-  LayoutDashboard,
+  Search,
+  Settings,
   Car,
-  AlertTriangle,
-  ShieldCheck,
-  Activity,
   CheckCircle2,
   XCircle,
+  RefreshCw,
+  ShieldCheck,
+  Clock,
   LogOut,
+  X,
+  Phone,
+  Radio,
+  Printer,
+  ChevronRight,
+  Wallet,
+  AlertTriangle,
 } from "lucide-react";
-
-export interface Transaction {
-  id: string;
-  timestamp: Date;
-  plateNumber: string;
-  agentId: string;
-  amount: number;
-  status: "PAID" | "UNPAID";
-  isNew: boolean;
-}
-
-export interface DashboardKPIs {
-  totalCollected: number;
-  busesCleared: number;
-  disputes: number;
-}
-
-// Utility to generate realistic Lagos plate numbers
-const generatePlateNumber = (): string => {
-  const lgas = ["LND", "KJA", "EKY", "APP", "SMK", "BDG", "AAA", "MUS", "GGE"];
-  const lga = lgas[Math.floor(Math.random() * lgas.length)];
-  const num = Math.floor(Math.random() * 900) + 100;
-  const letters =
-    String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
-    String.fromCharCode(65 + Math.floor(Math.random() * 26));
-  return `${lga}-${num}-${letters}`;
-};
-
-// Utility to generate mock transactions
-const createMockTransaction = (id?: string): Transaction => {
-  const isPaid = Math.random() > 0.15; // 85% chance of being paid
-  return {
-    id: id || `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-    timestamp: new Date(),
-    plateNumber: generatePlateNumber(),
-    agentId: `AG-${(Math.floor(Math.random() * 90) + 10).toString().padStart(3, "0")}`,
-    amount: 500, // Standard daily levy
-    status: isPaid ? "PAID" : "UNPAID",
-    isNew: true, // Flag for animation
-  };
-};
+import {
+  Transaction,
+  DashboardSummary,
+  VehicleStatus,
+  fetchDashboardSummary,
+  fetchTransactions,
+  fetchVehicleStatus,
+  checkBackendHealth,
+  getBaseApiUrl,
+  DEFAULT_API_URL,
+} from "@/lib/api";
 
 const formatNaira = (amount: number): string => {
   return new Intl.NumberFormat("en-NG", {
@@ -63,7 +40,7 @@ const formatNaira = (amount: number): string => {
   }).format(amount);
 };
 
-const formatTime = (date: Date): string => {
+const formatClock = (date: Date): string => {
   return date.toLocaleTimeString("en-US", {
     hour12: true,
     hour: "2-digit",
@@ -73,298 +50,723 @@ const formatTime = (date: Date): string => {
 };
 
 export default function AgberoReconDashboard() {
+  // Live Ledger & KPI state
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [kpis, setKpis] = useState<DashboardKPIs>({
-    totalCollected: 142500,
-    busesCleared: 285,
-    disputes: 3,
+  const [kpis, setKpis] = useState<DashboardSummary>({
+    date: new Date().toISOString().slice(0, 10),
+    totalCollected: 0,
+    paidCount: 0,
+    unpaidCount: 0,
+    plateCount: 0,
   });
-  const [currentTime, setCurrentTime] = useState<Date | null>(null);
-  const [mounted, setMounted] = useState<boolean>(false);
 
-  // Clock effect and mounted check for hydration consistency
+  // Filters state (wired to backend query parameters)
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "PAID" | "UNPAID">("ALL");
+  const [dateFilter, setDateFilter] = useState<"today" | "all">("today");
+  const [searchPlate, setSearchPlate] = useState<string>("");
+
+  // Polling & connection state
+  const [mounted, setMounted] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<Date | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  const [backendHealth, setBackendHealth] = useState<{
+    ok: boolean;
+    statusText: string;
+    latencyMs: number;
+  }>({ ok: true, statusText: "Online", latencyMs: 0 });
+
+  // Verification & Detail Drawer
+  const [showDrawer, setShowDrawer] = useState<boolean>(false);
+  const [drawerPlate, setDrawerPlate] = useState<string>("LND-234-XY");
+  const [drawerResult, setDrawerResult] = useState<VehicleStatus | null>(null);
+  const [drawerLoading, setDrawerLoading] = useState<boolean>(false);
+  const [drawerError, setDrawerError] = useState<string | null>(null);
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+
+  // Settings Modal
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+  const [customApiUrl, setCustomApiUrl] = useState<string>(DEFAULT_API_URL);
+
+  // Mount effect & clock
   useEffect(() => {
     setMounted(true);
     setCurrentTime(new Date());
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
+    setCustomApiUrl(getBaseApiUrl());
+    const clockTimer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(clockTimer);
   }, []);
 
-  // Initial data load and Simulation effect
+  // Fetch live ledger and summary from Render backend
+  const loadData = useCallback(async (showIndicator = false) => {
+    if (showIndicator) setIsRefreshing(true);
+    try {
+      const [health, summaryRes, txRes] = await Promise.allSettled([
+        checkBackendHealth(),
+        fetchDashboardSummary(),
+        fetchTransactions({
+          status: statusFilter,
+          date: dateFilter,
+          limit: 50,
+          plate: searchPlate.trim(),
+        }),
+      ]);
+
+      if (health.status === "fulfilled") {
+        setBackendHealth(health.value);
+      }
+
+      if (summaryRes.status === "fulfilled") {
+        setKpis(summaryRes.value.summary);
+      }
+
+      if (txRes.status === "fulfilled") {
+        setTransactions(txRes.value.transactions);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [statusFilter, dateFilter, searchPlate]);
+
+  // Initial load and filter change
   useEffect(() => {
-    // Generate initial historical data
-    const initialData: Transaction[] = Array.from({ length: 10 })
-      .map((_, i) => ({
-        ...createMockTransaction(`init-${i}`),
-        timestamp: new Date(Date.now() - (10 - i) * 60000), // past minutes
-        isNew: false,
-      }))
-      .reverse();
-    setTransactions(initialData);
+    loadData(true);
+  }, [loadData]);
 
-    // Live incoming data simulation
-    const liveInterval = setInterval(() => {
-      const newTx = createMockTransaction();
+  // Polling interval (4 seconds)
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => loadData(false), 4000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, loadData]);
 
-      setTransactions((prev) => {
-        const updated = [newTx, ...prev];
-        // Keep memory clean, store max 50 rows
-        return updated.slice(0, 50);
-      });
+  // Perform live vehicle plate check
+  const handleVerifyPlate = async (plateToCheck?: string) => {
+    const target = (plateToCheck || drawerPlate).trim();
+    if (!target) return;
+    setDrawerPlate(target.toUpperCase());
+    setDrawerLoading(true);
+    setDrawerError(null);
+    setDrawerResult(null);
 
-      // Update KPIs
-      setKpis((prev) => {
-        if (newTx.status === "PAID") {
-          return {
-            ...prev,
-            totalCollected: prev.totalCollected + newTx.amount,
-            busesCleared: prev.busesCleared + 1,
-          };
-        } else {
-          return { ...prev, disputes: prev.disputes + 1 };
-        }
-      });
-    }, 3000);
+    try {
+      const res = await fetchVehicleStatus(target);
+      setDrawerResult(res);
+    } catch (err: unknown) {
+      setDrawerError(err instanceof Error ? err.message : "Vehicle verification failed");
+    } finally {
+      setDrawerLoading(false);
+    }
+  };
 
-    return () => clearInterval(liveInterval);
-  }, []);
-
-  // Custom styles for row flashing animation and custom scrollbars
-  const styleSheet = `
-    @keyframes flashHighlight {
-      0% { background-color: #dcfce7; }
-      10% { background-color: #bbf7d0; }
-      100% { background-color: transparent; }
-    }
-    @keyframes flashError {
-      0% { background-color: #fee2e2; }
-      10% { background-color: #fecaca; }
-      100% { background-color: transparent; }
-    }
-    .animate-flash-paid {
-      animation: flashHighlight 2.5s ease-out forwards;
-    }
-    .animate-flash-unpaid {
-      animation: flashError 2.5s ease-out forwards;
-    }
-    .table-scrollbar::-webkit-scrollbar {
-      width: 6px;
-    }
-    .table-scrollbar::-webkit-scrollbar-track {
-      background: #f1f5f9; 
-    }
-    .table-scrollbar::-webkit-scrollbar-thumb {
-      background: #cbd5e1; 
-      border-radius: 4px;
-    }
-    .table-scrollbar::-webkit-scrollbar-thumb:hover {
-      background: #94a3b8; 
-    }
-  `;
+  // Open drawer from a specific transaction row
+  const openRowDetails = (tx: Transaction) => {
+    setSelectedTx(tx);
+    setDrawerPlate(tx.plateNumber);
+    setShowDrawer(true);
+    handleVerifyPlate(tx.plateNumber);
+  };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
-      <style>{styleSheet}</style>
-
-      {/* Top Navigation */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
+    <div className="min-h-screen bg-[#F6F5F2] text-[#18181B] font-sans antialiased selection:bg-[#E2EAE4]">
+      {/* 1. TOP HEADER */}
+      <header className="border-b border-[#E3E6E2] bg-[#F6F5F2] sticky top-0 z-20">
+        <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-16">
+            {/* Logo */}
             <div className="flex items-center gap-3">
-              <div className="bg-green-700 p-2 rounded-md">
-                <ShieldCheck className="h-6 w-6 text-white" />
+              <div className="w-8 h-8 rounded-md bg-[#1B4D2E] text-white flex items-center justify-center shadow-xs">
+                <ShieldCheck className="h-5 w-5" />
               </div>
-              <div>
-                <h1 className="text-xl font-bold text-slate-900 tracking-tight">AgberoRecon</h1>
-                <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">
-                  Transport Levy Settlement
-                </p>
-              </div>
+              <Link href="/dashboard" className="text-xl font-bold tracking-tight text-[#1B4D2E]">
+                AgberoRecon
+              </Link>
             </div>
 
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200 text-sm font-medium text-slate-700">
-                <Activity className="h-4 w-4 text-green-600 animate-pulse" />
-                <span className="hidden sm:inline">System Live</span>
+            {/* Right Controls: Auto-refresh, Status, Clock, Settings, Logout */}
+            <div className="flex items-center gap-2.5 sm:gap-3">
+              {/* Auto Sync Toggle */}
+              <button
+                type="button"
+                onClick={() => setAutoRefresh(!autoRefresh)}
+                className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors cursor-pointer ${
+                  autoRefresh
+                    ? "bg-[#EBF0EC] text-[#1B4D2E] border-[#D5DDD6]"
+                    : "bg-[#EFECE5] text-[#5B635E] border-[#E0DDD5]"
+                }`}
+                title="Toggle real-time ledger polling"
+              >
+                <Radio className={`h-3 w-3 ${autoRefresh ? "text-[#1B4D2E] animate-pulse" : "text-[#7A7871]"}`} />
+                <span>Auto-sync: {autoRefresh ? "ON" : "OFF"}</span>
+              </button>
+
+              {/* Backend Status Pill */}
+              <button
+                type="button"
+                onClick={() => setShowSettings(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-[#EBF0EC] text-[#1B4D2E] hover:bg-[#E2E8E3] transition-colors border border-[#D5DDD6] cursor-pointer"
+                title="Click to view backend configuration"
+              >
+                <span className="w-2 h-2 rounded-full bg-[#15803D] animate-pulse" />
+                <span className="font-mono text-[11px]">{backendHealth.latencyMs}ms</span>
+              </button>
+
+              {/* Park Clock */}
+              <div className="hidden md:flex items-center gap-1.5 text-xs text-[#5B635E] font-mono border-l border-[#D5DDD6] pl-3">
+                <Clock className="h-3.5 w-3.5 text-[#7A827D]" />
+                <span>{mounted && currentTime ? formatClock(currentTime) : "--:--:--"}</span>
               </div>
-              <div className="flex items-center gap-2 text-slate-600 border-l border-slate-200 pl-4">
-                <Clock className="h-5 w-5" />
-                <span className="font-mono text-sm font-medium">
-                  {mounted && currentTime ? formatTime(currentTime) : "--:--:--"}
-                </span>
-              </div>
+
+              {/* Settings Gear */}
+              <button
+                type="button"
+                onClick={() => setShowSettings(true)}
+                className="p-2 rounded-lg text-[#5B635E] hover:text-[#18181B] hover:bg-[#EBF0EC] transition-colors cursor-pointer"
+                title="Settings"
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+
+              {/* Sign Out */}
               <Link
                 href="/login"
-                className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-red-700 bg-slate-100 hover:bg-red-50 border border-slate-200 px-3 py-1.5 rounded-lg transition-colors"
-                title="Sign out to authentication portal"
+                className="p-2 rounded-lg text-[#5B635E] hover:text-[#B91C1C] hover:bg-[#FDECEE] transition-colors"
+                title="Sign Out"
               >
-                <LogOut className="h-3.5 w-3.5" />
-                <span className="hidden md:inline">Sign Out</span>
+                <LogOut className="h-4 w-4" />
               </Link>
             </div>
           </div>
         </div>
-      </nav>
+      </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* KPI Cards */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Card 1 */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+      {/* 2. HERO BAR */}
+      <section className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-6">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-[#163824]">
+              Live Transactions
+            </h1>
+            <p className="text-xs sm:text-sm text-[#5B635E] mt-1">
+              Real-time USSD transport levy collections and vehicle compliance checks.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => loadData(true)}
+              disabled={isRefreshing}
+              className="px-3.5 py-2.5 rounded-lg bg-[#EBF0EC] hover:bg-[#E2E8E3] text-[#18181B] text-xs font-semibold border border-[#D5DDD6] flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
+              <span>Sync</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedTx(null);
+                setDrawerPlate("LND-234-XY");
+                setShowDrawer(true);
+                handleVerifyPlate("LND-234-XY");
+              }}
+              className="px-4 py-2.5 rounded-lg bg-[#1B4D2E] hover:bg-[#153E24] text-white text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-98"
+            >
+              <Car className="h-3.5 w-3.5 text-white" />
+              <span>Verify Vehicle</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* 3. FUNCTIONAL STAT CARDS (White Cards on Canvas) */}
+      <section className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 pb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Total Collected */}
+          <div className="bg-white rounded-2xl p-5 border border-[#E3E6E2] shadow-xs flex flex-col justify-between">
             <div className="flex justify-between items-start">
-              <div>
-                <p className="text-sm font-medium text-slate-500">Total Collected Today</p>
-                <h2 className="text-3xl font-bold text-slate-900 mt-1">
-                  {formatNaira(kpis.totalCollected)}
-                </h2>
-              </div>
-              <div className="bg-green-50 p-3 rounded-lg">
-                <BanknotesIcon className="h-6 w-6 text-green-600" />
+              <span className="text-xs font-medium text-[#5B635E]">Total Collected Today</span>
+              <div className="w-8 h-8 rounded-md bg-[#1B4D2E] text-white flex items-center justify-center">
+                <Wallet className="h-4 w-4" />
               </div>
             </div>
-            <div className="mt-4 flex items-center text-sm text-green-600 font-medium">
-              <span>Settlement sync pending for 11:59 PM</span>
+            <div className="mt-4">
+              <h3 className="text-2xl sm:text-3xl font-bold text-[#18181B] tracking-tight">
+                {formatNaira(kpis.totalCollected)}
+              </h3>
+              <p className="text-[11px] text-[#5B635E] mt-1 font-mono">
+                Fixed ₦500 / bus
+              </p>
             </div>
           </div>
 
-          {/* Card 2 */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+          {/* Buses Cleared (Paid) */}
+          <div className="bg-white rounded-2xl p-5 border border-[#E3E6E2] shadow-xs flex flex-col justify-between">
             <div className="flex justify-between items-start">
-              <div>
-                <p className="text-sm font-medium text-slate-500">Buses Cleared</p>
-                <h2 className="text-3xl font-bold text-slate-900 mt-1">
-                  {kpis.busesCleared.toLocaleString()}
-                </h2>
-              </div>
-              <div className="bg-blue-50 p-3 rounded-lg">
-                <Car className="h-6 w-6 text-blue-600" />
+              <span className="text-xs font-medium text-[#5B635E]">Buses Cleared</span>
+              <div className="w-8 h-8 rounded-md bg-[#246B39] text-white flex items-center justify-center">
+                <CheckCircle2 className="h-4 w-4" />
               </div>
             </div>
-            <div className="mt-4 flex items-center text-sm text-slate-500">
-              <span>Verified across 14 active zones</span>
+            <div className="mt-4">
+              <h3 className="text-2xl sm:text-3xl font-bold text-[#18181B] tracking-tight">
+                {kpis.paidCount.toLocaleString()}
+              </h3>
+              <p className="text-[11px] text-[#1B4D2E] font-medium mt-1">
+                Settled via USSD
+              </p>
             </div>
           </div>
 
-          {/* Card 3 */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+          {/* Disputes / Unpaid */}
+          <div className="bg-white rounded-2xl p-5 border border-[#E3E6E2] shadow-xs flex flex-col justify-between">
             <div className="flex justify-between items-start">
-              <div>
-                <p className="text-sm font-medium text-slate-500">Disputes / Unpaid</p>
-                <h2 className="text-3xl font-bold text-slate-900 mt-1">{kpis.disputes}</h2>
-              </div>
-              <div className="bg-red-50 p-3 rounded-lg">
-                <AlertTriangle className="h-6 w-6 text-red-600" />
+              <span className="text-xs font-medium text-[#5B635E]">Disputes / Unpaid</span>
+              <div className="w-8 h-8 rounded-md bg-[#B91C1C] text-white flex items-center justify-center">
+                <AlertTriangle className="h-4 w-4" />
               </div>
             </div>
-            <div className="mt-4 flex items-center text-sm text-slate-500">
-              <span>Requires agent intervention</span>
+            <div className="mt-4">
+              <h3 className="text-2xl sm:text-3xl font-bold text-[#18181B] tracking-tight">
+                {kpis.unpaidCount.toLocaleString()}
+              </h3>
+              <p className="text-[11px] text-[#B91C1C] font-medium mt-1">
+                Requires agent check
+              </p>
             </div>
           </div>
-        </section>
 
-        {/* Live Transaction Ledger */}
-        <section className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-          <div className="px-6 py-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
-            <div className="flex items-center gap-2">
-              <LayoutDashboard className="h-5 w-5 text-slate-400" />
-              <h3 className="text-lg font-semibold text-slate-900">Live Transaction Ledger</h3>
+          {/* Distinct Vehicles */}
+          <div className="bg-white rounded-2xl p-5 border border-[#E3E6E2] shadow-xs flex flex-col justify-between">
+            <div className="flex justify-between items-start">
+              <span className="text-xs font-medium text-[#5B635E]">Unique Vehicles</span>
+              <div className="w-8 h-8 rounded-md bg-[#18181B] text-white flex items-center justify-center">
+                <Car className="h-4 w-4" />
+              </div>
             </div>
-            <span className="text-xs font-medium bg-slate-200 text-slate-600 px-2.5 py-1 rounded-full">
-              Updating real-time via USSD
-            </span>
+            <div className="mt-4">
+              <h3 className="text-2xl sm:text-3xl font-bold text-[#18181B] tracking-tight">
+                {kpis.plateCount.toLocaleString()}
+              </h3>
+              <p className="text-[11px] text-[#5B635E] mt-1 font-mono">
+                {kpis.date}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 4. TABLE CONTROLS BAR */}
+      <section className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 pb-4">
+        <div className="border-b border-[#E3E6E2] pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          {/* Plate Number Search */}
+          <div className="flex items-center gap-2 text-xs text-[#5B635E] w-full sm:w-80 bg-[#EBF0EC] rounded-lg px-3.5 py-2.5 border border-[#D5DDD6] focus-within:border-[#1B4D2E] focus-within:bg-[#E4EBE5] transition-all">
+            <Search className="h-3.5 w-3.5 text-[#7A827D] shrink-0" />
+            <input
+              type="text"
+              placeholder="Filter by plate (e.g. LND-234-XY)..."
+              value={searchPlate}
+              onChange={(e) => setSearchPlate(e.target.value.toUpperCase())}
+              className="bg-transparent border-none text-xs text-[#18181B] placeholder-[#8A918C] focus:outline-hidden w-full font-mono font-medium"
+            />
+            {searchPlate && (
+              <button
+                type="button"
+                onClick={() => setSearchPlate("")}
+                className="text-[#7A827D] hover:text-[#18181B] cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
 
-          <div className="overflow-x-auto max-h-[600px] table-scrollbar">
-            <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
-              <thead className="bg-slate-50 sticky top-0 z-10">
+          {/* Status & Date Filters */}
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            {/* Status Pills */}
+            <div className="flex items-center bg-[#EBF0EC] p-1 rounded-lg border border-[#D5DDD6]">
+              {(["ALL", "PAID", "UNPAID"] as const).map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => setStatusFilter(opt)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                    statusFilter === opt
+                      ? "bg-white text-[#18181B] font-semibold shadow-xs"
+                      : "text-[#5B635E] hover:text-[#18181B]"
+                  }`}
+                >
+                  {opt === "ALL" ? "All" : opt === "PAID" ? "Paid" : "Unpaid"}
+                </button>
+              ))}
+            </div>
+
+            {/* Date Pills */}
+            <div className="flex items-center bg-[#EBF0EC] p-1 rounded-lg border border-[#D5DDD6]">
+              <button
+                type="button"
+                onClick={() => setDateFilter("today")}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                  dateFilter === "today"
+                    ? "bg-white text-[#18181B] font-semibold shadow-xs"
+                    : "text-[#5B635E] hover:text-[#18181B]"
+                }`}
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                onClick={() => setDateFilter("all")}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                  dateFilter === "all"
+                    ? "bg-white text-[#18181B] font-semibold shadow-xs"
+                    : "text-[#5B635E] hover:text-[#18181B]"
+                }`}
+              >
+                All History
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 5. LEDGER TABLE */}
+      <section className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 pb-16">
+        <div className="overflow-x-auto bg-white rounded-2xl border border-[#E3E6E2] shadow-xs">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr className="text-[#6B756F] font-medium border-b border-[#E3E6E2] bg-[#F9FAF9]">
+                <th className="py-3.5 px-4 font-medium">Timestamp</th>
+                <th className="py-3.5 px-4 font-medium">Vehicle Plate</th>
+                <th className="py-3.5 px-4 font-medium">Handset Phone</th>
+                <th className="py-3.5 px-4 font-medium">Status</th>
+                <th className="py-3.5 px-4 font-medium">Levy Amount</th>
+                <th className="py-3.5 px-4 font-medium text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#EAEFEA]">
+              {transactions.length === 0 ? (
                 <tr>
-                  <th scope="col" className="px-6 py-3 font-semibold text-slate-500">
-                    Timestamp
-                  </th>
-                  <th scope="col" className="px-6 py-3 font-semibold text-slate-500">
-                    Plate Number
-                  </th>
-                  <th scope="col" className="px-6 py-3 font-semibold text-slate-500">
-                    Agent ID
-                  </th>
-                  <th scope="col" className="px-6 py-3 font-semibold text-slate-500">
-                    Amount
-                  </th>
-                  <th scope="col" className="px-6 py-3 font-semibold text-slate-500">
-                    Status
-                  </th>
+                  <td colSpan={6} className="py-14 text-center">
+                    <div className="flex flex-col items-center justify-center max-w-sm mx-auto">
+                      <div className="w-10 h-10 rounded-full bg-[#EBF0EC] flex items-center justify-center text-[#1B4D2E] mb-3">
+                        <Car className="h-5 w-5" />
+                      </div>
+                      <h4 className="text-sm font-semibold text-[#18181B]">
+                        No transactions recorded on ledger
+                      </h4>
+                      <p className="text-xs text-[#5B635E] mt-1">
+                        Transactions will appear automatically as drivers dial USSD (*384*...) or enforcement agents verify vehicles.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedTx(null);
+                          setDrawerPlate("LND-234-XY");
+                          setShowDrawer(true);
+                          handleVerifyPlate("LND-234-XY");
+                        }}
+                        className="mt-4 px-3.5 py-2 bg-[#1B4D2E] hover:bg-[#153E24] text-white text-xs font-semibold rounded-lg cursor-pointer transition-colors"
+                      >
+                        Verify Plate: LND-234-XY
+                      </button>
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 bg-white">
-                {transactions.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="px-6 py-10 text-center text-slate-500">
-                      Waiting for USSD gateway connections...
-                    </td>
-                  </tr>
-                ) : (
-                  transactions.map((tx) => (
+              ) : (
+                transactions.map((tx) => {
+                  const isPaid = tx.status === "PAID";
+                  return (
                     <tr
                       key={tx.id}
-                      className={`hover:bg-slate-50 transition-colors duration-150 ${
-                        tx.isNew
-                          ? tx.status === "PAID"
-                            ? "animate-flash-paid"
-                            : "animate-flash-unpaid"
-                          : ""
-                      }`}
+                      onClick={() => openRowDetails(tx)}
+                      className="hover:bg-[#F6F8F6] transition-colors cursor-pointer"
                     >
-                      <td className="px-6 py-4 whitespace-nowrap text-slate-500 font-mono text-xs">
-                        {formatTime(tx.timestamp)}
+                      {/* Timestamp */}
+                      <td className="py-4 px-4 font-mono text-[#5B635E]">
+                        <div>{tx.localTime || new Date(tx.createdAt).toLocaleTimeString()}</div>
+                        <div className="text-[10px] text-[#8A918C]">
+                          {tx.localDate || new Date(tx.createdAt).toLocaleDateString()}
+                        </div>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap font-medium text-slate-900">
-                        {tx.plateNumber}
+
+                      {/* Vehicle Plate */}
+                      <td className="py-4 px-4">
+                        <span className="font-mono font-bold text-sm text-[#18181B]">
+                          {tx.plateNumber}
+                        </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-slate-600">{tx.agentId}</td>
-                      <td className="px-6 py-4 whitespace-nowrap font-medium text-slate-700">
-                        {formatNaira(tx.amount)}
+
+                      {/* Handset Phone */}
+                      <td className="py-4 px-4 font-mono text-[#5B635E]">
+                        {tx.phone || "—"}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {tx.status === "PAID" ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-green-100 text-green-800 border border-green-200">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            PAID
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-800 border border-red-200">
-                            <XCircle className="h-3.5 w-3.5" />
-                            UNPAID
-                          </span>
-                        )}
+
+                      {/* Status */}
+                      <td className="py-4 px-4">
+                        <span
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${
+                            isPaid
+                              ? "bg-[#E6F0E8] text-[#1B4D2E] border border-[#CDE0D1]"
+                              : "bg-[#FDECEE] text-[#991B1B] border border-[#F8D2D6]"
+                          }`}
+                        >
+                          {isPaid ? (
+                            <>
+                              <CheckCircle2 className="h-3 w-3" />
+                              PAID
+                            </>
+                          ) : (
+                            <>
+                              <XCircle className="h-3 w-3" />
+                              UNPAID
+                            </>
+                          )}
+                        </span>
+                      </td>
+
+                      {/* Amount */}
+                      <td className="py-4 px-4 font-bold text-[#18181B] font-mono">
+                        {formatNaira(tx.amount || 500)}
+                      </td>
+
+                      {/* Action */}
+                      <td className="py-4 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRowDetails(tx);
+                          }}
+                          className="text-xs font-semibold text-[#1B4D2E] hover:text-[#153E24] inline-flex items-center gap-0.5 cursor-pointer"
+                        >
+                          <span>Verify</span>
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </button>
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </main>
-    </div>
-  );
-}
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-// Icon helper for Banknotes
-function BanknotesIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-      strokeWidth={1.5}
-      stroke="currentColor"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z"
-      />
-    </svg>
+      {/* 6. SLIDE-OVER VEHICLE VERIFICATION & SETTLEMENT DETAIL DRAWER */}
+      {showDrawer && (
+        <div className="fixed inset-0 z-50 flex justify-end">
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-[#0A1610]/35 backdrop-blur-2xs transition-opacity"
+            onClick={() => setShowDrawer(false)}
+          />
+
+          {/* Drawer Panel */}
+          <div className="relative w-full max-w-md bg-white h-full shadow-2xl z-10 flex flex-col justify-between overflow-y-auto animate-in slide-in-from-right duration-250 border-l border-[#E3E6E2]">
+            <div>
+              {/* Header */}
+              <div className="p-6 border-b border-[#E3E6E2] flex justify-between items-center">
+                <h3 className="text-base font-bold text-[#163824]">
+                  Vehicle Verification
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowDrawer(false)}
+                  className="text-[#6B756F] hover:text-[#18181B] p-1 rounded-md cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 space-y-5">
+                {/* Search / Plate Input */}
+                <div>
+                  <label className="block text-xs font-medium text-[#18181B] mb-1.5">
+                    Vehicle Plate Number
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={drawerPlate}
+                      onChange={(e) => setDrawerPlate(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => e.key === "Enter" && handleVerifyPlate()}
+                      placeholder="e.g. LND-234-XY"
+                      className="flex-1 px-3.5 py-2.5 rounded-lg bg-[#EBF0EC] text-xs font-mono font-semibold text-[#18181B] border border-transparent focus:border-[#1B4D2E] focus:outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleVerifyPlate()}
+                      disabled={drawerLoading}
+                      className="px-4 py-2.5 rounded-lg bg-[#1B4D2E] text-white text-xs font-semibold hover:bg-[#153E24] disabled:opacity-50 cursor-pointer transition-colors"
+                    >
+                      {drawerLoading ? "Checking..." : "Check"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Quick Chips */}
+                <div className="flex items-center gap-1.5 flex-wrap text-xs text-[#5B635E]">
+                  <span>Seeded demo plates:</span>
+                  {["LND-234-XY", "KJA-892-BC", "APP-552-XY", "UNREG-99"].map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => {
+                        setDrawerPlate(chip);
+                        handleVerifyPlate(chip);
+                      }}
+                      className="px-2 py-0.5 rounded-md bg-[#EBF0EC] text-[#1B4D2E] font-mono text-[11px] hover:bg-[#E2E8E3] cursor-pointer"
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Live Verification Result Box */}
+                {drawerResult && (
+                  <div className="p-5 rounded-xl bg-[#F6F5F2] border border-[#E3E6E2] space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Car className="h-5 w-5 text-[#1B4D2E]" />
+                        <span className="font-mono text-base font-bold text-[#18181B]">
+                          {drawerResult.plateNumber}
+                        </span>
+                      </div>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                          drawerResult.status === "PAID"
+                            ? "bg-[#E6F0E8] text-[#1B4D2E] border border-[#CDE0D1]"
+                            : "bg-[#FDECEE] text-[#991B1B] border border-[#F8D2D6]"
+                        }`}
+                      >
+                        {drawerResult.status}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2.5 text-xs text-[#5B635E] pt-3 border-t border-[#E3E6E2]">
+                      <div className="flex justify-between">
+                        <span>Wallet Registration:</span>
+                        <span className="font-semibold text-[#18181B]">
+                          {drawerResult.registered ? "Registered in Wallet" : "Unregistered"}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between">
+                        <span>Daily Levy Amount:</span>
+                        <span className="font-semibold text-[#18181B] font-mono">
+                          ₦500.00
+                        </span>
+                      </div>
+
+                      {drawerResult.paidAt && (
+                        <div className="flex justify-between">
+                          <span>Settled At:</span>
+                          <span className="font-mono text-[#18181B]">
+                            {new Date(drawerResult.paidAt).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex justify-between">
+                        <span>Verified At:</span>
+                        <span className="font-mono text-[#8A918C]">
+                          {new Date(drawerResult.checkedAt).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {selectedTx && (
+                      <div className="pt-3 border-t border-[#E3E6E2] text-xs space-y-1">
+                        <div className="text-[#8A918C]">Handset Phone:</div>
+                        <div className="font-mono text-[#18181B] font-semibold">{selectedTx.phone}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {drawerError && (
+                  <div className="p-3.5 rounded-lg bg-[#FDECEE] text-[#991B1B] text-xs border border-[#F8D2D6]">
+                    {drawerError}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-6 border-t border-[#E3E6E2] flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowDrawer(false)}
+                className="flex-1 py-2.5 rounded-lg border border-[#D5DDD6] text-xs font-semibold text-[#18181B] hover:bg-[#F6F5F2] cursor-pointer"
+              >
+                Close
+              </button>
+              {drawerResult?.status === "PAID" && (
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="flex-1 py-2.5 rounded-lg bg-[#1B4D2E] hover:bg-[#153E24] text-xs font-semibold text-white cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <Printer className="h-3.5 w-3.5" />
+                  <span>Print Slip</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. BACKEND SETTINGS MODAL */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 bg-[#0A1610]/40 backdrop-blur-2xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-[#E3E6E2]">
+            <div className="flex justify-between items-center border-b border-[#E3E6E2] pb-3">
+              <h3 className="text-sm font-bold text-[#163824]">Backend Integration Settings</h3>
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                className="text-[#6B756F] hover:text-[#18181B] cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="text-xs space-y-3">
+              <div>
+                <label className="block font-medium text-[#18181B] mb-1">API Base URL</label>
+                <input
+                  type="text"
+                  value={customApiUrl}
+                  onChange={(e) => setCustomApiUrl(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-[#EBF0EC] text-xs font-mono text-[#18181B] border border-[#D5DDD6] focus:border-[#1B4D2E] focus:outline-hidden"
+                />
+              </div>
+              <div className="p-3 rounded-lg bg-[#F6F5F2] space-y-1 text-[#5B635E] border border-[#E3E6E2]">
+                <div className="flex justify-between">
+                  <span>Server Status:</span>
+                  <span className="font-semibold text-[#15803D]">{backendHealth.statusText}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Roundtrip Latency:</span>
+                  <span className="font-mono text-[#18181B]">{backendHealth.latencyMs} ms</span>
+                </div>
+              </div>
+            </div>
+            <div className="pt-2 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                className="px-4 py-2 rounded-lg bg-[#1B4D2E] hover:bg-[#153E24] text-white text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
